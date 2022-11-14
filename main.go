@@ -27,6 +27,10 @@ type config struct {
 	Coefficient float64 `envconfig:"COEFFICIENT" default:"1"`
 }
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 func main() {
 	ctx := context.TODO()
 
@@ -36,8 +40,23 @@ func main() {
 		log.Fatalln("rate должен быть не меньше или равен 0")
 	}
 
+	initTopic(ctx, cfg)
 	go RunConsumer(ctx, cfg)
 	RunProducer(ctx, cfg)
+}
+
+func initTopic(ctx context.Context, cfg *config) {
+	brokers := strings.Split(cfg.Brokers, ",")
+	if len(brokers) == 0 {
+		log.Fatalln("адреса брокеров не указаны")
+	}
+	conn, err := kafka.DialContext(ctx, "tcp", strings.Split(cfg.Brokers, ",")[0])
+	if err != nil {
+		log.Fatalln("dial kafka failed. error: ", err.Error())
+	}
+	if err = conn.CreateTopics(kafka.TopicConfig{Topic: cfg.Topic, NumPartitions: 12, ReplicationFactor: 3}); err != nil {
+		log.Fatalln("create topic failed. error: ", err.Error())
+	}
 }
 
 func RunConsumer(ctx context.Context, cfg *config) {
@@ -45,7 +64,7 @@ func RunConsumer(ctx context.Context, cfg *config) {
 	fetchedMessageChanByPartition, processedMessageChan := consumer.Consume(ctx)
 
 	var wg sync.WaitGroup
-	for _, fetchedMessageChan := range fetchedMessageChanByPartition { // TODO: Нужно спросить в целом какой API сделать для либы
+	for _, fetchedMessageChan := range fetchedMessageChanByPartition {
 		fetchedMessageChan := fetchedMessageChan
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
@@ -57,7 +76,7 @@ func RunConsumer(ctx context.Context, cfg *config) {
 					case <-ctx.Done():
 						return
 					case msg := <-fetchedMessageChan:
-						Sleep(cfg.Coefficient)
+						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
 						fmt.Printf("Read. Value: %s. Partition: %d. Offset: %d\n", string(msg.Value), msg.Partition, msg.Offset)
 						processedMessageChan <- msg
 					}
@@ -76,24 +95,15 @@ func RunProducer(ctx context.Context, cfg *config) {
 		Balancer: new(kafka.LeastBytes),
 	}
 
-	for {
+	ticker := time.NewTicker(time.Millisecond * (time.Duration(rand.Intn(int(10 * cfg.Coefficient)))))
+	for range ticker.C {
 		id := uuid.New().String()
 
-		if err := w.WriteMessages(ctx,
-			kafka.Message{
-				Value: []byte(id),
-			},
-		); err != nil {
+		if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
 			log.Fatalln("write message failed. error: ", err.Error())
 		}
 		fmt.Printf("Write. Value: %s\n", id)
-		Sleep(cfg.Coefficient)
 	}
-}
-
-func Sleep(coef float64) {
-	ms := time.Millisecond*10 + time.Duration(rand.Intn(int(100*coef)))
-	time.Sleep(ms)
 }
 
 type Consumer struct {
@@ -127,7 +137,7 @@ func NewConsumer(cfg *config) *Consumer {
 	}
 }
 
-func (c *Consumer) Consume(ctx context.Context) (map[int]chan kafka.Message, chan kafka.Message) {
+func (c *Consumer) Consume(ctx context.Context) (map[int]<-chan kafka.Message, chan<- kafka.Message) {
 	generation, err := c.group.Next(ctx)
 	if err != nil {
 		log.Fatalln(err)
@@ -139,14 +149,7 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]chan kafka.Message, cha
 		log.Fatalln("топик не найден")
 	}
 
-	//for _, partition := range partitions {
-	//	c.partitions[partition.ID] = ProcessedRecords{
-	//		NextOffset:       partition.Offset, // TODO: Оказывается приходит -1 и -2. Непонятно какой элемент ждать следующий
-	//		ProcessedOffsets: list.New(),       // -1 видимо означает что нет данных о последних оффсетах коммитов и тогда хз где вообще начало / нужна логика на инициализацию лупа по первым сообщениям из партиций/ то есть первые сообщения из партиций при -1 будут инициализировать луп
-	//	}
-	//}
-
-	fetchedMessageChanByPartition := make(map[int]chan kafka.Message, len(partitions))
+	fetchedMessageChanByPartition := make(map[int]<-chan kafka.Message, len(partitions))
 
 	var wg sync.WaitGroup
 	for _, partition := range partitions {
@@ -183,8 +186,8 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]chan kafka.Message, cha
 			}
 
 			c.partitions[id] = &ProcessedRecords{
-				NextOffset:       msg.Offset, // TODO: Оказывается приходит -1 и -2. Непонятно какой элемент ждать следующий
-				ProcessedOffsets: list.New(), // -1 видимо означает что нет данных о последних оффсетах коммитов и тогда хз где вообще начало / нужна логика на инициализацию лупа по первым сообщениям из партиций/ то есть первые сообщения из партиций при -1 будут инициализировать луп
+				NextOffset:       msg.Offset,
+				ProcessedOffsets: list.New(),
 			}
 			wg.Done()
 			messageChan <- msg
@@ -209,25 +212,18 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]chan kafka.Message, cha
 }
 
 func (c *Consumer) runCommitLoop(ctx context.Context) {
-	partitions := make(map[int]int64, len(c.partitions))
 	offsets := map[string]map[int]int64{
-		c.topic: partitions,
+		c.topic: make(map[int]int64, len(c.partitions)),
 	}
 
 	go func() {
+		ticker := time.NewTicker(time.Second)
 		for {
-			ticker := time.NewTicker(time.Second)
 			select {
 			case <-ctx.Done():
-				// TODO: понять как нужно выходить из цикла
+				c.flushOffsets(offsets)
 			case <-ticker.C:
-				for partition, records := range c.partitions {
-					partitions[partition] = records.NextOffset
-				}
-
-				data, _ := json.Marshal(offsets)
-				println(string(data))
-				_ = c.generation.CommitOffsets(offsets) // TODO: понять что нужно делать с ошибкой
+				c.flushOffsets(offsets)
 			case record := <-c.processedMessageChan:
 				processedRecords, ok := c.partitions[record.Partition]
 				if ok {
@@ -248,6 +244,18 @@ func (c *Consumer) runCommitLoop(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (c *Consumer) flushOffsets(offsets map[string]map[int]int64) {
+	for _, partitions := range offsets {
+		for partition, records := range c.partitions {
+			partitions[partition] = records.NextOffset
+		}
+	}
+
+	data, _ := json.Marshal(offsets)
+	println(string(data))
+	_ = c.generation.CommitOffsets(offsets) // TODO: понять что нужно делать с ошибкой
 }
 
 func insertionPush(processedOffsets *list.List, offset int64) {
