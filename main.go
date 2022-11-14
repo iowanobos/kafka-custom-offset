@@ -65,10 +65,9 @@ func RunConsumer(ctx context.Context, cfg *config) {
 
 	var wg sync.WaitGroup
 	for _, fetchedMessageChan := range fetchedMessageChanByPartition {
-		fetchedMessageChan := fetchedMessageChan
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
-			go func() {
+			go func(i int, fetchedMessageChan <-chan kafka.Message) {
 				defer wg.Done()
 
 				for {
@@ -77,11 +76,11 @@ func RunConsumer(ctx context.Context, cfg *config) {
 						return
 					case msg := <-fetchedMessageChan:
 						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
-						fmt.Printf("Read. Value: %s. Partition: %d. Offset: %d\n", string(msg.Value), msg.Partition, msg.Offset)
+						fmt.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
 						processedMessageChan <- msg
 					}
 				}
-			}()
+			}(i, fetchedMessageChan)
 		}
 	}
 
@@ -95,14 +94,14 @@ func RunProducer(ctx context.Context, cfg *config) {
 		Balancer: new(kafka.LeastBytes),
 	}
 
-	ticker := time.NewTicker(time.Millisecond * (time.Duration(rand.Intn(int(10 * cfg.Coefficient)))))
-	for range ticker.C {
+	ticker := time.NewTicker(time.Millisecond * (1 + time.Duration(rand.Intn(int(10*cfg.Coefficient)))))
+	for t := range ticker.C {
 		id := uuid.New().String()
 
 		if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
 			log.Fatalln("write message failed. error: ", err.Error())
 		}
-		fmt.Printf("Write. Value: %s\n", id)
+		fmt.Printf("Write. Value: %s. Time: %s\n", id, t.String())
 	}
 }
 
