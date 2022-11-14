@@ -93,8 +93,8 @@ func RunConsumer(ctx context.Context, cfg *config) {
 					case <-ctx.Done():
 						return
 					case msg := <-fetchedMessageChan:
-						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
 						fmt.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
+						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
 						processedMessageChan <- msg
 					}
 				}
