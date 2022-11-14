@@ -1,4 +1,4 @@
-module education/segmentio-kafka
+module github.com/iowanobos/kafka-custom-offset
 
 go 1.18
 
