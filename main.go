@@ -49,12 +49,18 @@ func initTopic(ctx context.Context, cfg *config) {
 	if len(brokers) == 0 {
 		log.Fatalln("адреса брокеров не указаны")
 	}
-	conn, err := kafka.DialContext(ctx, "tcp", strings.Split(cfg.Brokers, ",")[0])
-	if err != nil {
-		log.Fatalln("dial kafka failed. error: ", err.Error())
-	}
-	if err = conn.CreateTopics(kafka.TopicConfig{Topic: cfg.Topic, NumPartitions: 12, ReplicationFactor: 3}); err != nil {
-		log.Fatalln("create topic failed. error: ", err.Error())
+	for _, broker := range brokers {
+		conn, err := kafka.DialContext(ctx, "tcp", broker)
+		if err != nil {
+			log.Fatalln("dial kafka failed. error: ", err.Error())
+		}
+
+		if err = conn.CreateTopics(kafka.TopicConfig{Topic: cfg.Topic, NumPartitions: 12, ReplicationFactor: 3}); err != nil {
+			log.Println("create topic failed. error: ", err.Error())
+		} else {
+			log.Println("create topic succeeded")
+			break
+		}
 	}
 }
 
