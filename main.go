@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"os/signal"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/iowanobos/kafka-custom-offset/consumer"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/segmentio/kafka-go"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -31,7 +34,7 @@ func init() {
 }
 
 func main() {
-	ctx := context.TODO()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	cfg := new(config)
 	envconfig.MustProcess(configPrefix, cfg)
@@ -40,8 +43,28 @@ func main() {
 	}
 
 	initTopic(ctx, cfg)
-	go RunProducer(ctx, cfg)
-	RunConsumer(ctx, cfg)
+	var eg errgroup.Group
+	eg.Go(func() error {
+		return RunProducer(ctx, cfg)
+	})
+	eg.Go(func() error {
+		return RunConsumer(ctx, cfg)
+	})
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT)
+	select {
+	case <-sigc:
+		cancel()
+		if err := eg.Wait(); err != nil {
+			log.Println("Shutdown error: ", err.Error())
+		}
+	}
+	log.Println("Application shut downing...")
 }
 
 func initTopic(ctx context.Context, cfg *config) {
@@ -64,7 +87,7 @@ func initTopic(ctx context.Context, cfg *config) {
 	}
 }
 
-func RunProducer(ctx context.Context, cfg *config) {
+func RunProducer(ctx context.Context, cfg *config) error {
 	w := &kafka.Writer{
 		Addr:     kafka.TCP(strings.Split(cfg.Brokers, ",")...),
 		Topic:    cfg.Topic,
@@ -73,42 +96,60 @@ func RunProducer(ctx context.Context, cfg *config) {
 
 	ticker := time.NewTicker(time.Millisecond * (1 + time.Duration(rand.Intn(int(10*cfg.Coefficient)))))
 	for range ticker.C {
-		go func() {
-			id := uuid.New().String()
 
-			if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
-				log.Fatalln("write message failed. error: ", err.Error())
-			}
-			fmt.Printf("Write. Value: %s\n", id)
-		}()
+		select {
+		case <-ctx.Done():
+			fmt.Println("RunProducer shutdown")
+			return ctx.Err()
+		default:
+			go func() {
+				id := uuid.New().String()
+
+				if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
+					log.Println("write message failed. error: ", err.Error())
+					return
+				}
+				fmt.Printf("Write. Value: %s\n", id)
+			}()
+		}
 	}
+
+	return nil
 }
 
-func RunConsumer(ctx context.Context, cfg *config) {
+func RunConsumer(ctx context.Context, cfg *config) error {
 	fetchedMessageChanByPartition, processedMessageChan := consumer.
 		New(strings.Split(cfg.Brokers, ","), cfg.GroupID, cfg.Topic).
 		Consume(ctx)
 
-	var wg sync.WaitGroup
-	for _, fetchedMessageChan := range fetchedMessageChanByPartition {
+	var eg errgroup.Group
+	for partition, fetchedMessageChan := range fetchedMessageChanByPartition {
+		partition := partition
+		fetchedMessageChan := fetchedMessageChan
 		for i := 0; i < 10; i++ {
-			wg.Add(1)
-			go func(i int, fetchedMessageChan <-chan kafka.Message) {
-				defer wg.Done()
+			i := i
 
+			eg.Go(func() error {
 				for {
 					select {
 					case <-ctx.Done():
-						return
+						fmt.Printf("RunConsumer shutdown. Partition %d. Worker %d\n", partition, i)
+						return ctx.Err()
 					case msg := <-fetchedMessageChan:
 						fmt.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
 						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
-						processedMessageChan <- msg
+
+						select {
+						case <-ctx.Done():
+							fmt.Printf("RunConsumer fetched shutdown. Partition %d. Worker %d\n", partition, i)
+							return ctx.Err()
+						case processedMessageChan <- msg:
+						}
 					}
 				}
-			}(i, fetchedMessageChan)
+			})
 		}
 	}
 
-	wg.Wait()
+	return eg.Wait()
 }

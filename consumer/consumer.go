@@ -105,7 +105,12 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]<-chan kafka.Message, c
 				}
 				fmt.Printf("Fetch. Value: %s. Partition: %d. Offset: %d\n", string(msg.Value), msg.Partition, msg.Offset)
 
-				messageChan <- msg
+				select {
+				case <-ctx.Done():
+					log.Println("fetch shutdown")
+					return
+				case messageChan <- msg:
+				}
 			}
 		})
 	}
@@ -126,7 +131,9 @@ func (c *Consumer) runCommitLoop(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				fmt.Println("runCommitLoop shutdown")
 				c.flushOffsets(offsets)
+				return
 			case <-ticker.C:
 				c.flushOffsets(offsets)
 			case record := <-c.processedMessageChan:
@@ -159,11 +166,14 @@ func (c *Consumer) flushOffsets(offsets map[string]map[int]int64) {
 	}
 
 	data, _ := json.Marshal(offsets)
-	println(string(data))
-	_ = c.generation.CommitOffsets(offsets) // TODO: понять что нужно делать с ошибкой
+	fmt.Println(string(data))
+	if err := c.generation.CommitOffsets(offsets); err != nil {
+		fmt.Printf("commit offsets failed. error: %s\n", err.Error())
+	}
 }
 
 func insertionPush(processedOffsets *list.List, offset int64) {
+	fmt.Printf("cache size: %d\n", processedOffsets.Len())
 	elem := processedOffsets.Back()
 	for {
 		if elem == nil {
