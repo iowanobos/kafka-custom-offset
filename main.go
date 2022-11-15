@@ -66,13 +66,15 @@ func RunProducer(ctx context.Context, cfg *config) {
 	}
 
 	ticker := time.NewTicker(time.Millisecond * (1 + time.Duration(rand.Intn(int(10*cfg.Coefficient)))))
-	for t := range ticker.C {
-		id := uuid.New().String()
+	for range ticker.C {
+		go func() {
+			id := uuid.New().String()
 
-		if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
-			log.Fatalln("write message failed. error: ", err.Error())
-		}
-		fmt.Printf("Write. Value: %s. Time: %s\n", id, t.String())
+			if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
+				log.Fatalln("write message failed. error: ", err.Error())
+			}
+			fmt.Printf("Write. Value: %s\n", id)
+		}()
 	}
 }
 
