@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log"
 	"math/rand"
 	"os"
@@ -47,8 +47,9 @@ func main() {
 	eg.Go(func() error {
 		return RunProducer(ctx, cfg)
 	})
+	group := consumer.New(strings.Split(cfg.Brokers, ","), cfg.GroupID, cfg.Topic)
 	eg.Go(func() error {
-		return RunConsumer(ctx, cfg)
+		return RunConsumer(ctx, cfg, group)
 	})
 
 	sigc := make(chan os.Signal, 1)
@@ -59,9 +60,15 @@ func main() {
 		syscall.SIGQUIT)
 	select {
 	case <-sigc:
+		log.Println("Start shutdowning")
+		if err := group.Close(); err != nil {
+			log.Println("close consumer group failed. error: ", err.Error())
+		}
 		cancel()
 		if err := eg.Wait(); err != nil {
-			log.Println("Shutdown error: ", err.Error())
+			if !errors.Is(err, context.Canceled) {
+				log.Println("Shutdown error: ", err.Error())
+			}
 		}
 	}
 	log.Println("Application shut downing...")
@@ -99,17 +106,15 @@ func RunProducer(ctx context.Context, cfg *config) error {
 
 		select {
 		case <-ctx.Done():
-			fmt.Println("RunProducer shutdown")
 			return ctx.Err()
 		default:
 			go func() {
 				id := uuid.New().String()
 
 				if err := w.WriteMessages(ctx, kafka.Message{Value: []byte(id)}); err != nil {
-					log.Println("write message failed. error: ", err.Error())
 					return
 				}
-				fmt.Printf("Write. Value: %s\n", id)
+				log.Printf("Write. Value: %s\n", id)
 			}()
 		}
 	}
@@ -117,10 +122,8 @@ func RunProducer(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func RunConsumer(ctx context.Context, cfg *config) error {
-	fetchedMessageChanByPartition, processedMessageChan := consumer.
-		New(strings.Split(cfg.Brokers, ","), cfg.GroupID, cfg.Topic).
-		Consume(ctx)
+func RunConsumer(ctx context.Context, cfg *config, group *consumer.Consumer) error {
+	fetchedMessageChanByPartition, processedMessageChan := group.Consume(ctx)
 
 	var eg errgroup.Group
 	for partition, fetchedMessageChan := range fetchedMessageChanByPartition {
@@ -133,15 +136,19 @@ func RunConsumer(ctx context.Context, cfg *config) error {
 				for {
 					select {
 					case <-ctx.Done():
-						fmt.Printf("RunConsumer shutdown. Partition %d. Worker %d\n", partition, i)
+						log.Printf("RunConsumer shutdown. Partition %d. Worker %d\n", partition, i)
 						return ctx.Err()
-					case msg := <-fetchedMessageChan:
-						fmt.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
+					case msg, ok := <-fetchedMessageChan:
+						if !ok {
+							return nil
+						}
+
+						log.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
 						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
 
 						select {
 						case <-ctx.Done():
-							fmt.Printf("RunConsumer fetched shutdown. Partition %d. Worker %d\n", partition, i)
+							log.Printf("RunConsumer fetched shutdown. Partition %d. Worker %d\n", partition, i)
 							return ctx.Err()
 						case processedMessageChan <- msg:
 						}

@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -40,6 +39,10 @@ func New(brokers []string, groupID, topic string) *Consumer {
 		partitions:           make(map[int]*ProcessedRecords),
 		processedMessageChan: make(chan kafka.Message),
 	}
+}
+
+func (c *Consumer) Close() error {
+	return c.group.Close()
 }
 
 func (c *Consumer) Consume(ctx context.Context) (map[int]<-chan kafka.Message, chan<- kafka.Message) {
@@ -103,11 +106,12 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]<-chan kafka.Message, c
 					log.Println("fetch message failed. error: ", err.Error())
 					return
 				}
-				fmt.Printf("Fetch. Value: %s. Partition: %d. Offset: %d\n", string(msg.Value), msg.Partition, msg.Offset)
+				log.Printf("Fetch. Value: %s. Partition: %d. Offset: %d\n", string(msg.Value), msg.Partition, msg.Offset)
 
 				select {
 				case <-ctx.Done():
 					log.Println("fetch shutdown")
+					close(messageChan)
 					return
 				case messageChan <- msg:
 				}
@@ -131,7 +135,7 @@ func (c *Consumer) runCommitLoop(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("runCommitLoop shutdown")
+				log.Println("runCommitLoop shutdown")
 				c.flushOffsets(offsets)
 				return
 			case <-ticker.C:
@@ -139,7 +143,12 @@ func (c *Consumer) runCommitLoop(ctx context.Context) {
 			case record := <-c.processedMessageChan:
 				processedRecords, ok := c.partitions[record.Partition]
 				if ok {
-					fmt.Printf("Processed. Partition: %d. Offset: %d. NextOffset: %d\n", record.Partition, record.Offset, processedRecords.NextOffset)
+
+					{
+						// TODO: Удалить
+						log.Printf("Processed. Partition: %d. Offset: %d. NextOffset: %d\n", record.Partition, record.Offset, processedRecords.NextOffset)
+					}
+
 					processedRecords.Lock()
 					if processedRecords.NextOffset == record.Offset {
 						processedRecords.NextOffset++
@@ -165,15 +174,23 @@ func (c *Consumer) flushOffsets(offsets map[string]map[int]int64) {
 		}
 	}
 
-	data, _ := json.Marshal(offsets)
-	fmt.Println(string(data))
+	{
+		// TODO: Удалить
+		data, _ := json.Marshal(offsets)
+		log.Println("flush offsets: ", string(data))
+	}
+
 	if err := c.generation.CommitOffsets(offsets); err != nil {
-		fmt.Printf("commit offsets failed. error: %s\n", err.Error())
+		log.Printf("commit offsets failed. error: %s\n", err.Error())
 	}
 }
 
 func insertionPush(processedOffsets *list.List, offset int64) {
-	fmt.Printf("cache size: %d\n", processedOffsets.Len())
+	{
+		// TODO: Удалить
+		log.Printf("cache size: %d\n", processedOffsets.Len())
+	}
+
 	elem := processedOffsets.Back()
 	for {
 		if elem == nil {
