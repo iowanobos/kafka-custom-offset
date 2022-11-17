@@ -61,14 +61,14 @@ func main() {
 	select {
 	case <-sigc:
 		log.Println("Start shutdowning")
-		if err := group.Close(); err != nil {
-			log.Println("close consumer group failed. error: ", err.Error())
-		}
 		cancel()
 		if err := eg.Wait(); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				log.Println("Shutdown error: ", err.Error())
 			}
+		}
+		if err := group.Close(); err != nil {
+			log.Println("close consumer group failed. error: ", err.Error())
 		}
 	}
 	log.Println("Application shut downing...")
