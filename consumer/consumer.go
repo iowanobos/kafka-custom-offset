@@ -1,9 +1,9 @@
 package consumer
 
 import (
-	"container/list"
 	"context"
 	"encoding/json"
+	"github.com/iowanobos/kafka-custom-offset/consumer/queue"
 	"log"
 	"sync"
 	"time"
@@ -95,7 +95,7 @@ func (c *Consumer) Consume(ctx context.Context) (map[int]<-chan kafka.Message, c
 
 			c.partitions[id] = &ProcessedRecords{
 				NextOffset:       msg.Offset,
-				ProcessedOffsets: list.New(),
+				ProcessedOffsets: queue.New(),
 			}
 			wg.Done()
 			messageChan <- msg
@@ -153,12 +153,13 @@ func (c *Consumer) runCommitLoop(ctx context.Context) {
 					if processedRecords.NextOffset == record.Offset {
 						processedRecords.NextOffset++
 
-						for hasNextOffset(processedRecords.ProcessedOffsets, processedRecords.NextOffset) {
+						for processedRecords.ProcessedOffsets.Root() == processedRecords.NextOffset {
+							processedRecords.ProcessedOffsets.Pop()
 							processedRecords.NextOffset++
 						}
 
 					} else {
-						insertionPush(processedRecords.ProcessedOffsets, record.Offset)
+						processedRecords.ProcessedOffsets.Push(record.Offset)
 					}
 					processedRecords.Unlock()
 				}
@@ -185,41 +186,8 @@ func (c *Consumer) flushOffsets(offsets map[string]map[int]int64) {
 	}
 }
 
-func insertionPush(processedOffsets *list.List, offset int64) {
-	{
-		// TODO: Удалить
-		log.Printf("cache size: %d\n", processedOffsets.Len())
-	}
-
-	elem := processedOffsets.Back()
-	for {
-		if elem == nil {
-			processedOffsets.PushFront(offset)
-			return
-		}
-
-		if value, ok := elem.Value.(int64); ok {
-			if value > offset {
-				elem = elem.Prev()
-			} else {
-				processedOffsets.InsertAfter(offset, elem)
-				return
-			}
-		}
-	}
-}
-
-func hasNextOffset(processedOffsets *list.List, offset int64) bool {
-	elem := processedOffsets.Front()
-	if elem != nil && elem.Value == offset {
-		processedOffsets.Remove(elem)
-		return true
-	}
-	return false
-}
-
 type ProcessedRecords struct {
 	sync.Mutex
 	NextOffset       int64
-	ProcessedOffsets *list.List
+	ProcessedOffsets *queue.Queue
 }
