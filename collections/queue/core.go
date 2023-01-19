@@ -1,6 +1,10 @@
 package queue
 
-type priorityQueue[T ~int | int64 | int32] []T
+type numeric interface {
+	~int | int64 | int32 | int16 | int8
+}
+
+type priorityQueue[T numeric] []T
 
 func (pq priorityQueue[T]) Root() T {
 	if len(pq) > 0 {
@@ -11,9 +15,7 @@ func (pq priorityQueue[T]) Root() T {
 
 func (pq priorityQueue[T]) Len() int { return len(pq) }
 
-func (pq priorityQueue[T]) Less(i, j int) bool {
-	return pq[i] < pq[j]
-}
+func (pq priorityQueue[T]) Less(i, j int) bool { return pq[i] < pq[j] }
 
 func (pq priorityQueue[T]) Swap(i, j int) {
 	pq[i], pq[j] = pq[j], pq[i]

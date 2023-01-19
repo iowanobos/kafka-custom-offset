@@ -14,6 +14,10 @@ func New() *Queue {
 	}
 }
 
+func (q *Queue) Len() int {
+	return q.pq.Len()
+}
+
 func (q *Queue) Root() int64 {
 	return q.pq.Root()
 }

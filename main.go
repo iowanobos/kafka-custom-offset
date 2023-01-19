@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/iowanobos/kafka-custom-offset/consumer"
+	"github.com/iowanobos/kafka-custom-offset/gossamer"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/segmentio/kafka-go"
 	"golang.org/x/sync/errgroup"
@@ -47,9 +47,21 @@ func main() {
 	eg.Go(func() error {
 		return RunProducer(ctx, cfg)
 	})
-	group := consumer.New(strings.Split(cfg.Brokers, ","), cfg.GroupID, cfg.Topic)
+
+	group, err := gossamer.NewGroup(gossamer.Options{
+		Brokers:              strings.Split(cfg.Brokers, ","),
+		Group:                cfg.GroupID,
+		Topic:                cfg.Topic,
+		PartitionWorkerCount: 100,
+	})
+	if err != nil {
+		log.Fatalf("Create consumer group failed. Error: %v\n", err)
+	}
+
 	eg.Go(func() error {
-		return RunConsumer(ctx, cfg, group)
+		go group.Run(Consumer{cfg: cfg})
+		<-ctx.Done()
+		return group.Close()
 	})
 
 	sigc := make(chan os.Signal, 1)
@@ -62,14 +74,13 @@ func main() {
 	case <-sigc:
 		log.Println("Start shutdowning")
 		cancel()
+
 		if err := eg.Wait(); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				log.Println("Shutdown error: ", err.Error())
 			}
 		}
-		if err := group.Close(); err != nil {
-			log.Println("close consumer group failed. error: ", err.Error())
-		}
+
 	}
 	log.Println("Application shut downing...")
 }
@@ -96,18 +107,19 @@ func initTopic(ctx context.Context, cfg *config) {
 
 func RunProducer(ctx context.Context, cfg *config) error {
 	w := &kafka.Writer{
-		Addr:     kafka.TCP(strings.Split(cfg.Brokers, ",")...),
-		Topic:    cfg.Topic,
-		Balancer: new(kafka.LeastBytes),
+		Addr:  kafka.TCP(strings.Split(cfg.Brokers, ",")...),
+		Topic: cfg.Topic,
 	}
 
 	ticker := time.NewTicker(time.Millisecond * (1 + time.Duration(rand.Intn(int(10*cfg.Coefficient)))))
-	for range ticker.C {
-
+	breakTicker := time.NewTicker(time.Second * 5)
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
+		case <-breakTicker.C:
+			time.Sleep(time.Second * 3)
+		case <-ticker.C:
 			go func() {
 				id := uuid.New().String()
 
@@ -122,41 +134,17 @@ func RunProducer(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func RunConsumer(ctx context.Context, cfg *config, group *consumer.Consumer) error {
-	fetchedMessageChanByPartition, processedMessageChan := group.Consume(ctx)
+type Consumer struct {
+	cfg *config
+}
 
-	var eg errgroup.Group
-	for partition, fetchedMessageChan := range fetchedMessageChanByPartition {
-		partition := partition
-		fetchedMessageChan := fetchedMessageChan
-		for i := 0; i < 10; i++ {
-			i := i
+func (c Consumer) Consume(ctx context.Context, message kafka.Message) error {
+	log.Printf("Read. Value: %s. Partition: %d. Offset: %d\n", string(message.Value), message.Partition, message.Offset)
+	processDuration := time.Millisecond * (100 + time.Duration(rand.Intn(int(300*c.cfg.Coefficient))))
 
-			eg.Go(func() error {
-				for {
-					select {
-					case <-ctx.Done():
-						log.Printf("RunConsumer shutdown. Partition %d. Worker %d\n", partition, i)
-						return ctx.Err()
-					case msg, ok := <-fetchedMessageChan:
-						if !ok {
-							return nil
-						}
-
-						log.Printf("Read %d. Value: %s. Partition: %d. Offset: %d\n", i, string(msg.Value), msg.Partition, msg.Offset)
-						time.Sleep(time.Millisecond * (100 + time.Duration(rand.Intn(int(300*cfg.Coefficient)))))
-
-						select {
-						case <-ctx.Done():
-							log.Printf("RunConsumer fetched shutdown. Partition %d. Worker %d\n", partition, i)
-							return ctx.Err()
-						case processedMessageChan <- msg:
-						}
-					}
-				}
-			})
-		}
+	select {
+	case <-time.After(processDuration):
+	case <-ctx.Done():
 	}
-
-	return eg.Wait()
+	return nil
 }
